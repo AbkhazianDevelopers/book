@@ -1,0 +1,4 @@
+aiohttp==3.13.0
+beautifulsoup4==4.14.2
+loguru==0.7.3
+rich==14.2.0
