@@ -1,0 +1,28 @@
+{
+  "messages": [
+    {
+      "type": "warning",
+      "message": "test message",
+      "data": {},
+      "isActive": false
+    }
+  ],
+  "last_version_app": {
+    "ios": "1.0.0",
+    "android" "1.0.0"
+  },
+  "author": {
+    "name": "Astamur Ladariya",
+    "description": "Example description for author page", 
+    "links": [
+      {
+        "type": "github",
+        "link": "https://github.com/reques6e"
+      },
+      {
+        "type": "telegram",
+        "link": "https://t.me/rqs6e"
+      },
+    ]
+  }
+}
