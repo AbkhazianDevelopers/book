@@ -26,7 +26,8 @@ jobs:
       - name: Выгрузка дампа
         run: |
           mkdir -p dumps  
-          mv books-dump-*.json dumps/  
+          mv books-dump-*.json dumps/
+          mv parser-*.json dumps/
           
       - name: Сохранение в репозитории
         run: |
