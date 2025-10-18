@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"name": "root",
+			"path": "."
+		},
+		{
+			"name": "Synchronization database",
+			"path": "src/synchronization"
+		},
+		{
+			"name": "Mobile app",
+			"path": "src/mobile"
+		},
+		{
+			"name": "Backend",
+			"path": "src/backend"
+		}
+	],
+	"settings": {}
+}

@@ -5,25 +5,43 @@ import time
 import re
 import json
 from urllib.parse import urlparse, parse_qs
-from loguru import logger
+from helper.logger import logger
 from bs4 import BeautifulSoup as soup
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 from rich.console import Console 
 from datetime import datetime
-
-logger.remove()  
+from config import settings
+from helper.models import BookData, BookModel
+from module.database import DatabaseConnector
 
 class Library:
     def __init__(self):
-        self.base_url = "https://lib.agu.site/books/"
+        self.base_url = settings.library_url
+        self.session = None
 
-    def _update_logger(self, current_time: str):
-        logger.add(f"parser-{current_time}.log", rotation="10 MB", level="DEBUG")  
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(
+            base_url=self.base_url,
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    async def _ensure_session(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                base_url=self.base_url,
+            )
+
+    async def __request(self, url: str) -> str:
+        await self._ensure_session()
+        async with self.session.get(url) as response:
+            return await response.text()
 
     async def get_all_books_count(self) -> int:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.base_url) as response:
-                html = await response.text()
+        html = await self.__request(self.base_url)
         
         page_soup = soup(html, "html.parser")
         intro_block = page_soup.find("div", {"class": "intro"})
@@ -37,9 +55,7 @@ class Library:
                     return book_count
 
     async def get_all_pages_count(self) -> int:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.base_url) as response:
-                html = await response.text()
+        html = await self.__request(self.base_url)
 
         page_soup = soup(html, "html.parser")
         pagination = page_soup.find("div", {"class": "nav-pages"})
@@ -53,7 +69,7 @@ class Library:
                     pagen_value = query_params['PAGEN_1'][0] 
                     return int(pagen_value)
 
-    async def get_book_info(self, url: str):
+    async def get_book_info(self, url: str) -> dict:
         book_data = {
             'url': url,
             'image': '',
@@ -70,9 +86,7 @@ class Library:
             'file': '',
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                html = await response.text()
+        html = await self.__request(url)
         
         page_soup = soup(html, "html.parser")
         book_info = page_soup.find("div", {"class": "bookdetail"})
@@ -144,9 +158,7 @@ class Library:
         return book_data
 
     async def get_books_in_page(self, page: int):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.base_url + f'?PAGEN_1={page}') as response:
-                html = await response.text()
+        html = await self.__request(self.base_url + f'?PAGEN_1={page}')
 
         page_soup = soup(html, "html.parser")
 
@@ -163,7 +175,7 @@ class Library:
                 'image': '',
                 'title': '',
                 'author': '',
-                'description': ''
+                'description': '',
             }
             
             # Ссылка и название книги
@@ -195,9 +207,6 @@ class Library:
         return data
 
     async def main(self):
-        current_time = datetime.now().strftime("%Y-%m-%d")
-        self._update_logger(current_time)
-        
         logger.info(f'Начало парсинга книг | {datetime.now().strftime("%Y-%m-%d")}')
 
         total_books = await self.get_all_books_count()
@@ -206,33 +215,21 @@ class Library:
 
         logger.info(f'Кол-во страниц: {total_pages} | {total_books} книг')
         
-        console = Console()
-        all_books = {
-            'books': [],
-            'count': 0,
-            'errors': 0,
-            'success': 0,
-        }
+        all_books = BookData(
+            books=[],
+            count=0,
+            errors=0,
+            success=0,
+        )
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("•"),
-            TimeRemainingColumn(),
-            console=console,
-        ) as progress:
-            main_task = progress.add_task(
-                f"[cyan]Обработка книг...", 
-                total=total_books
-            )
+        book_counter = 0
+        book_errors = 0
+        book_success = 0
 
-            book_counter = 0
-            book_errors = 0
-            book_success = 0
+        db_connector = DatabaseConnector()
 
-            for page in range(1, total_pages + 1):
+        for page in range(1, total_pages + 1):
+            try:
                 data = await self.get_books_in_page(page)
                 logger.info(f'Страница {page} | {data["count"]} книг')
 
@@ -243,41 +240,53 @@ class Library:
                 for book in data['books']:
                     book_counter += 1
 
-                    progress.update(
-                        main_task,
-                        description=f"[cyan]Книга {book_counter}/{total_books} | Страница {page}/{total_pages} | {book['title'][:50]}..."
-                    )
-
                     try:
+                        if not book.get('url'):
+                            logger.error(f'Книга без URL: {book.get("title", "Без названия")}')
+                            book_errors += 1
+                            continue
+
                         book_data = await self.get_book_info(book['url'])
-                        all_books['books'].append(book_data) 
-                        progress.update(main_task, advance=1)
+                        all_books.books.append(book_data) 
 
                         book_success += 1
                         logger.info(f'Книга {book["title"]} ✓')
-                        logger.info(json.dumps(book_data, ensure_ascii=False, indent=2))
+                        logger.debug(json.dumps(book_data, ensure_ascii=False, indent=2))
+                        
+                        try:
+                            db_result = db_connector.load_books_from_data([book_data])
+                            logger.debug(f'Книга {book["title"]} загружена в БД')
+                        except Exception as db_e:
+                            logger.warning(f'Ошибка загрузки в БД: {db_e}')
+                            
                     except Exception as e:
                         book_errors += 1
-                        logger.error(f'Книга {book["title"]} ✗ | Ошибка:\n{e}')
+                        logger.error(f'Книга {book.get("title", "Без названия")} ✗ | Ошибка:\n{e}')
 
-            progress.update(main_task, description=f"[green]✓ Обработано {total_books} книг!")
+            except Exception as page_e:
+                logger.error(f'Ошибка обработки страницы {page}: {page_e}')
+                continue
         
-        all_books['count'] += total_books
-        all_books['errors'] += book_errors
-        all_books['success'] += book_success
+        all_books.count = total_books
+        all_books.errors = book_errors
+        all_books.success = book_success
 
-        with open(f'books-dump-{current_time}.json', 'w', encoding='utf-8') as f:
-            json.dump(all_books, f, ensure_ascii=False, indent=2)
+        with open(f'books-dump.json', 'w', encoding='utf-8') as f:
+            json.dump(all_books.model_dump(), f, ensure_ascii=False, indent=2)
         
-        logger.success(f'Обработка завершена! Сохранено {all_books["count"]} книг')
-        logger.info(f'Время выполнения: {time.time() - start_time} секунд')
+        logger.success(f'Обработка завершена! Сохранено {all_books.success} книг')
+        logger.info(f'Ошибок: {all_books.errors}, Время выполнения: {time.time() - start_time:.2f} секунд')
+
+
+async def main():
+    async with Library() as lib:
+        try:
+            await lib.main()
+        except KeyboardInterrupt:
+            logger.error('Парсинг прерван пользователем')
+        except Exception as e:
+            logger.error(f'Неожиданная ошибка: {e}')
 
 
 if __name__ == '__main__':
-    lib = Library()
-    
-    try:
-        result = asyncio.run(lib.main())
-        # print(json.dumps(result, ensure_ascii=False, indent=2))
-    except KeyboardInterrupt:
-        logger.error(f'Парсинг прерван пользователем')
+    asyncio.run(main())
